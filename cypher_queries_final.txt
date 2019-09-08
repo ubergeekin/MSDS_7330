@@ -1,0 +1,62 @@
+// show some existing data
+match (n) return n limit 500
+
+// delete existing data
+match (n) detach delete n
+
+// load in dates only
+// hard-coded since less than 100 days are recorded
+// make sure dates are in YYYY-MM-DD format
+// make sure csv file has header line
+load csv with headers from
+'file:///amex_03-21-2019.csv' as line //CHANGE for other exchanges
+with line limit 300
+merge (date:Date {name: line.Date})
+
+// link dates together
+MATCH (date:Date)
+WITH date
+ORDER BY date.name
+WITH collect(date) as days
+FOREACH(i in RANGE(0, length(days)-2) |
+    FOREACH(day1 in [days[i]] |
+        FOREACH(day2 in [days[i+1]] |
+            CREATE UNIQUE (day1)-[:Next]->(day2))))
+
+// load rest of data in
+using periodic commit
+load csv with headers from
+'file:///amex_03-21-2019.csv' as line //CHANGE
+match (d:Date{name:line.Date})
+create (s:Symbol{name:line.Symbol}),
+(s)-[:Occurs]->(d),
+(s)-[:Has]->(:High {name:toFloat(line.High)}),
+(s)-[:Has]->(:Low {name:toFloat(line.Low)}),
+(s)-[:Has]->(:Open {name:toFloat(line.Open)}),
+(s)-[:Has]->(:Close {name:toFloat(line.Close)}),
+(s)-[:Has]->(:Volume {name:toInteger(line.Volume)}),
+(s)-[:Has]->(:Exchange {name:line.Exchange})
+
+// create index
+create index on :Date(name)
+// confirm index was created
+call db.indexes
+
+// creates VIR node for each symbol and day
+match (s:Symbol)
+with distinct s.name as symbolName
+match (d1:Date)-[*20]->(d2:Date) //get dates with 20 days between
+with {first:d1.name,last:d2.name} as dates, symbolName
+match (d:Date)-[:Occurs]-(s:Symbol)-[:Has]-(p:Close)
+where s.name=symbolName and d.name>=dates.first and d.name<=dates.last
+with max(p.name) as highestClose, dates, symbolName //highest close
+match (d:Date)-[:Occurs]-(s:Symbol)-[:Has]-(p:Close)
+where s.name=symbolName and d.name=dates.last
+with p.name as currentClose, highestClose, symbolName, dates //current close
+match (d:Date)-[:Occurs]-(s:Symbol)-[:Has]-(p:High)
+where s.name=symbolName and d.name>=dates.first and d.name<=dates.last
+with max(p.name) as highestHigh, currentClose, highestClose, symbolName, dates //highest high
+create (v:VIR{name:(highestClose-currentClose)/highestHigh*100})
+with symbolName, dates, v
+match (d:Date{name:dates.last})-[]-(s:Symbol{name:symbolName})
+create (s)-[:Has]->(v)
